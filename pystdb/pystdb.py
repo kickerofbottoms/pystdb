@@ -1,7 +1,3 @@
-"""
-credit to root670:
-    https://gist.github.com/root670/4166bcfc1586b2247ebd87e499e9a861
-"""
 
 import struct
 import os
@@ -162,8 +158,7 @@ class TrackGroup(DBStruct):
         self.tracks = {}
 
     def __repr__(self):
-        return '<{:04x}-{}>'.format(self.field_album_id.value,
-                                    self.field_track_group_id.value)
+        return '<{}>'.format(self.uid)
 
 
 class Track(object):
