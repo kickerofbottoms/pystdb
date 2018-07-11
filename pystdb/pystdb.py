@@ -13,16 +13,9 @@ class Field(object):
     def __init__(self, name, dtype, to_py=None, to_db=None):
         self.name = name
         self.dtype = dtype
-        self.to_py = to_py
-        self.to_db = to_db
-
+        self.to_py = to_py if to_py else lambda x: x
+        self.to_db = to_db if to_db else lambda x: x
         self.value = None
-
-    def __setattr__(self, key, value):
-        # todo: fix hackiness
-        if key == 'value' and self.to_py and value is not None:
-            value = self.to_py(value)
-        self.__dict__[key] = value
 
     @staticmethod
     def wchar_to_str(b):
@@ -39,11 +32,11 @@ class Field(object):
 
 class DBStruct(object):
     def __init__(self, db):
-        self.f = db.f
+        self.db = db
         self.fields = []
         self.data = []
 
-    def _add_field(self, name, dtype='I', n=1, **kwargs):
+    def _create_field(self, name, dtype='I', n=1, **kwargs):
         field = None
         for i in xrange(n):
             field = Field(name, dtype, **kwargs)
@@ -53,12 +46,15 @@ class DBStruct(object):
         else:
             return self.fields[-n:]
 
+    def _insert_field(self, field):
+        self.fields.append(field)
+        return field
+
     def read(self, offset):
-        self.f.seek(offset)
-        self.data = list(
-            struct.unpack(self.format, self.f.read(self.size)))
+        self.db.f.seek(offset)
+        self.data = list(struct.unpack(self.format, self.db.f.read(self.size)))
         for field, value in zip(self.fields, self.data):
-            field.value = value
+            field.value = field.to_py(value)
         return self.data
 
     @property
@@ -82,11 +78,11 @@ class Header(DBStruct):
 
     def __init__(self, db):
         super(Header, self).__init__(db)
-        self.field_magic = self._add_field('magic')
-        self.field_count_albums = self._add_field('count_albums')
-        self.field_next_album_id = self._add_field('next_album_id')
-        self.field_album_ids = self._add_field('album_id', n=100)
-        self.field_next_track_id = self._add_field('next_track_id')
+        self.field_magic = self._create_field('magic')
+        self.field_count_albums = self._create_field('count_albums')
+        self.field_next_album_id = self._create_field('next_album_id')
+        self.field_album_ids = self._create_field('album_id', n=100)
+        self.field_next_track_id = self._create_field('next_track_id')
         self.read(0)
 
 
@@ -103,14 +99,14 @@ class Album(DBStruct):
 
     def __init__(self, db, offset):
         super(Album, self).__init__(db)
-        self.field_magic = self._add_field('magic')
-        self.field_album_id = self._add_field('album_id')
-        self.field_count_tracks = self._add_field('count_tracks')
-        self.field_track_group_ids = self._add_field('track_group_id', n=84)
-        self.field_album_length_ms = self._add_field('album_length_ms')
-        self.field_album_name = self._add_field('name', dtype='64s',
-                                                to_py=Field.wchar_to_str,
-                                                to_db=Field.str_to_wchar)
+        self.field_magic = self._create_field('magic')
+        self.field_album_id = self._create_field('album_id')
+        self.field_count_tracks = self._create_field('count_tracks')
+        self.field_track_group_ids = self._create_field('track_group_id', n=84)
+        self.field_album_length_ms = self._create_field('album_length_ms')
+        self.field_album_name = self._create_field('name', dtype='64s',
+                                                   to_py=Field.wchar_to_str,
+                                                   to_db=Field.str_to_wchar)
         self.read(offset)
 
         self.hex_id = '{:04x}'.format(self.field_album_id.value)
@@ -142,15 +138,16 @@ class TrackGroup(DBStruct):
     def __init__(self, db, offset):
         super(TrackGroup, self).__init__(db)
         self.db = db
-        self.field_magic = self._add_field('magic')
-        self.field_album_id = self._add_field('album_id')
-        self.field_track_group_id = self._add_field('track_group_id')
-        self.field_padding = self._add_field('padding')
-        self.field_track_id = self._add_field('track_id', n=6)
-        self.field_track_length_ms = self._add_field('track_length_ms', n=6)
-        self.field_track_name = self._add_field('track_name', dtype='64s', n=6,
-                                                to_py=Field.wchar_to_str,
-                                                to_db=Field.str_to_wchar)
+        self.field_magic = self._create_field('magic')
+        self.field_album_id = self._create_field('album_id')
+        self.field_track_group_id = self._create_field('track_group_id')
+        self.field_padding = self._create_field('padding')
+        self.field_track_id = self._create_field('track_id', n=6)
+        self.field_track_length_ms = self._create_field('track_length_ms', n=6)
+        self.field_track_name = self._create_field('track_name', dtype='64s',
+                                                   n=6,
+                                                   to_py=Field.wchar_to_str,
+                                                   to_db=Field.str_to_wchar)
         self.read(offset)
 
         self.uid = '{:04x}{:04x}'.format(self.field_album_id.value,
@@ -161,20 +158,18 @@ class TrackGroup(DBStruct):
         return '<{}>'.format(self.uid)
 
 
-class Track(object):
+class Track(DBStruct):
     """for convenience, not a native struct"""
-    def __init__(self, group, index):
-        self.field_track_id = group.field_track_id[index]
-        self.field_track_name = group.field_track_name[index]
-        self.field_track_length_ms = group.field_track_length_ms[index]
-        self.field_track_group_id = group.field_track_group_id
-        self.field_album_id = group.field_album_id
-
-        self.fields = (
-            self.field_track_id,
-            self.field_track_name,
-            self.field_track_length_ms,
-            self.field_track_group_id)
+    def __init__(self, db, group, index):
+        super(Track, self).__init__(db)
+        self.field_track_id = self._insert_field(group.field_track_id[index])
+        self.field_track_name = \
+            self._insert_field(group.field_track_name[index])
+        self.field_track_length_ms = \
+            self._insert_field(group.field_track_length_ms[index])
+        self.field_track_group_id = \
+            self._insert_field(group.field_track_group_id)
+        self.field_album_id = self._insert_field(group.field_album_id)
 
         self.hex_id = '{:08x}'.format(self.field_track_id.value)
 
@@ -248,7 +243,7 @@ class STDB:
                 if not track_id:
                     continue  # not sure if always consecutive
 
-                track = Track(group, i)
+                track = Track(self, group, i)
                 album_id = track.field_album_id.value
 
                 tracks[track_id] = track
