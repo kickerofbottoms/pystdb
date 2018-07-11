@@ -123,7 +123,7 @@ class Album(DBStruct):
         self.track_groups = {}
         self.tracks = {}
 
-    def __repr__(self):
+    def __str__(self):
         return '<{}> {}'.format(self.hex_id, self.field_album_name.value)
 
 
@@ -157,7 +157,7 @@ class TrackGroup(DBStruct):
                                          self.field_track_group_id.value)
         self.tracks = {}
 
-    def __repr__(self):
+    def __str__(self):
         return '<{}>'.format(self.uid)
 
 
@@ -186,7 +186,7 @@ class Track(object):
             raise DBError('file "{}" does not exist for track "{}"'
                           .format(self.path, self.field_track_name.value))
 
-    def __repr__(self):
+    def __str__(self):
         return '<{}> {}'.format(self.name, self.field_track_name.value)
 
 
