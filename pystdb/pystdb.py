@@ -1,256 +1,145 @@
 
 import struct
 import os
+import logging
 
 UTF_16 = 'UTF-16-LE'
+
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger(__name__)
 
 
 class DBError(Exception):
     pass
 
 
+class Table(object):
+    block_size = 512
+
+    def __init__(self, db, offset):
+        self.db = db
+        self.offset = offset
+
+    def __repr__(self):
+        return '<{} instance at 0x{:x} with {}>'.format(
+            type(self).__name__, id(self), self.fields)
+
+    @property
+    def fields(self):
+        attrs = vars(type(self)).iterkeys()
+        return {k: getattr(self, k) for k in attrs if not k.startswith('_')}
+
+
 class Field(object):
-    def __init__(self, name, dtype, to_py=None, to_db=None):
-        self.name = name
-        self.dtype = dtype
-        self.to_py = to_py if to_py else lambda x: x
-        self.to_db = to_db if to_db else lambda x: x
-        self.value = None
+    def __init__(self, format_, offset, to_py=lambda x: x, to_db=lambda x: x):
+        self.struct = struct.Struct(format_)
+        self.offset = offset
+        self.size = self.struct.size
+        self.to_py = to_py
+        self.to_db = to_db
+
+    def __get__(self, table, owner):
+        table.db.seek(table.offset + self.offset)
+        value = self.struct.unpack(table.db.read(self.size))
+        value = self.to_py(value)
+        if len(value) == 1:
+            value = value[0]
+        return value
+
+    def __set__(self, instance, value):
+        raise NotImplementedError()
+
+    def __delete__(self, instance):
+        raise NotImplementedError()
 
     @staticmethod
     def wchar_to_str(b):
-        s = b.decode(UTF_16)
+        s = ''.join(b).decode(UTF_16)
         return s.rstrip('\0')
 
     @staticmethod
     def str_to_wchar(s, pad=64):
+        raise NotImplementedError()
         b = s.encode(UTF_16)
         while len(b) < pad:
-            b += '\0'.encode(UTF_16)
+            b += '\0'.encode(UTF_16)  # todo: encode once
         return b  # todo: test padding
 
 
-class DBStruct(object):
-    def __init__(self, db):
-        self.db = db
-        self.fields = []
-        self.data = []
-
-    def _create_field(self, name, dtype='I', n=1, **kwargs):
-        field = None
-        for i in xrange(n):
-            field = Field(name, dtype, **kwargs)
-            self.fields.append(field)
-        if n == 1:
-            return field
-        else:
-            return self.fields[-n:]
-
-    def _insert_field(self, field):
-        self.fields.append(field)
-        return field
-
-    def read(self, offset):
-        self.db.f.seek(offset)
-        self.data = list(struct.unpack(self.format, self.db.f.read(self.size)))
-        for field, value in zip(self.fields, self.data):
-            field.value = field.to_py(value)
-        return self.data
-
-    @property
-    def format(self):
-        return ' '.join(field.dtype for field in self.fields)
-
-    @property
-    def size(self):
-        return struct.calcsize(self.format)
+class Header(Table):
+    magic = Field('I', 0)
+    count_albums = Field('I', 4)
+    next_album_id = Field('I', 8)
+    album_ids = Field('100I', 12)
+    next_track_id = Field('I', 412)
 
 
-class Header(DBStruct):
-    """
-    int32	magic	always 0x01 0x00 0x00 0x00
-    int32	numSoundtracks
-    int32	nextSoundtrackId
-    int32	soundtrackIds[100]
-    int32	nextSongId
-    char	padding[96]
-    """
-
-    def __init__(self, db):
-        super(Header, self).__init__(db)
-        self.field_magic = self._create_field('magic')
-        self.field_count_albums = self._create_field('count_albums')
-        self.field_next_album_id = self._create_field('next_album_id')
-        self.field_album_ids = self._create_field('album_id', n=100)
-        self.field_next_track_id = self._create_field('next_track_id')
-        self.read(0)
+class Album(Table):
+    magic = Field('I', 0)
+    album_id = Field('I', 4)
+    count_tracks = Field('I', 8)
+    track_group_ids = Field('84I', 12)
+    album_length = Field('I', 348)
+    album_name = Field('64sx', 352,
+                       to_py=Field.wchar_to_str,
+                       to_db=Field.str_to_wchar)
 
 
-class Album(DBStruct):
-    """
-    int32	magic               always 0x71 0x13 0x02 0x00
-    int32	id
-    int32	numSongs            source gist labeled as "numSongGroups"
-    int32	songGroupIds[84]
-    int32	totalTimeMilliseconds
-    wchar	name[64]            Unicode string
-    char	padding[64]
-    """
-
-    def __init__(self, db, offset):
-        super(Album, self).__init__(db)
-        self.field_magic = self._create_field('magic')
-        self.field_album_id = self._create_field('album_id')
-        self.field_count_tracks = self._create_field('count_tracks')
-        self.field_track_group_ids = self._create_field('track_group_id', n=84)
-        self.field_album_length_ms = self._create_field('album_length_ms')
-        self.field_album_name = self._create_field('name', dtype='64s',
-                                                   to_py=Field.wchar_to_str,
-                                                   to_db=Field.str_to_wchar)
-        self.read(offset)
-
-        self.hex_id = '{:04x}'.format(self.field_album_id.value)
-
-        self.path = os.path.join(db.root, self.hex_id)
-        if not os.path.exists(self.path):
-            raise DBError('directory "{}" does not exist for album "{}"'
-                          .format(self.path, self.field_album_name.value))
-
-        self.track_groups = {}
-        self.tracks = {}
-
-    def __str__(self):
-        return '<{}> {}'.format(self.hex_id, self.field_album_name.value)
-
-
-class TrackGroup(DBStruct):
-    """
-    int32	magic           always 0x73 0x10 0x03 0x00
-    int32	soundtrackId
-    int32	id
-    int32	padding         why is this not null?
-    int32   songId[6]
-    int32   songTimeMilliseconds[6]
-    wchar   songName[64][6]
-    char	padding[64]     todo: verify
-    """
-
-    def __init__(self, db, offset):
-        super(TrackGroup, self).__init__(db)
-        self.db = db
-        self.field_magic = self._create_field('magic')
-        self.field_album_id = self._create_field('album_id')
-        self.field_track_group_id = self._create_field('track_group_id')
-        self.field_padding = self._create_field('padding')
-        self.field_track_id = self._create_field('track_id', n=6)
-        self.field_track_length_ms = self._create_field('track_length_ms', n=6)
-        self.field_track_name = self._create_field('track_name', dtype='64s',
-                                                   n=6,
-                                                   to_py=Field.wchar_to_str,
-                                                   to_db=Field.str_to_wchar)
-        self.read(offset)
-
-        self.uid = '{:04x}{:04x}'.format(self.field_album_id.value,
-                                         self.field_track_group_id.value)
-        self.tracks = {}
-
-    def __str__(self):
-        return '<{}>'.format(self.uid)
-
-
-class Track(DBStruct):
-    """for convenience, not a native struct"""
-    def __init__(self, db, group, index):
-        super(Track, self).__init__(db)
-        self.field_track_id = self._insert_field(group.field_track_id[index])
-        self.field_track_name = \
-            self._insert_field(group.field_track_name[index])
-        self.field_track_length_ms = \
-            self._insert_field(group.field_track_length_ms[index])
-        self.field_track_group_id = \
-            self._insert_field(group.field_track_group_id)
-        self.field_album_id = self._insert_field(group.field_album_id)
-
-        self.hex_id = '{:08x}'.format(self.field_track_id.value)
-
-        self.name = '{}.wma'.format(self.hex_id)
-        self.path = os.path.join(
-            group.db.root, self.hex_id[:4], self.name)
-
-        if not os.path.exists(self.path):
-            raise DBError('file "{}" does not exist for track "{}"'
-                          .format(self.path, self.field_track_name.value))
-
-    def __str__(self):
-        return '<{}> {}'.format(self.name, self.field_track_name.value)
+class TrackGroup(Table):
+    magic = Field('I', 0)
+    album_id = Field('I', 4)
+    track_group_id = Field('I', 8)
+    padding = Field('x', 12)
+    track_ids = Field('6I', 16)
+    track_lengths = Field('6I', 40)
+    # track_names = Field('384s', 40,
+    #                     to_py=Field.wchar_to_str,
+    #                     to_db=Field.str_to_wchar)
 
 
 class STDB:
     block_size = 512
 
     def __init__(self, path):
-        self.f = open(path, 'r')
+        self.f = open(path, 'rb')
         self.path = path
         self.root = os.path.dirname(path)
 
-        self.header = Header(self)
+        self.seek(0, 2)
+        self.size = self.tell()
+        self.seek(0)
 
-        # dicts
-        self.albums = self._get_albums()
-        self.track_groups = self._get_track_groups()
-        self.tracks = self._get_tracks()
+        self.header = Header(self, 0)
+        log.debug(self.header)
 
-    def _get_albums(self):
-        albums = {}
+        self.albums = tuple(self.iter_albums())
+        log.debug(self.albums)
 
-        count = self.header.field_count_albums.value
-        for offset in xrange(self.block_size,
-                             self.block_size * count + self.block_size,
-                             self.block_size):
+        self.track_groups = tuple(self.iter_track_groups())
+        log.debug(self.track_groups)
 
-            album = Album(self, offset)
-            album_id = album.field_album_id.value
+    def iter_albums(self):
+        start = self.block_size
+        stop = start + self.header.count_albums * self.block_size
+        step = self.block_size
+        for offset in xrange(start, stop, step):
+            yield Album(self, offset)
 
-            albums[album_id] = album
+    def iter_track_groups(self):
+        start = 101 * self.block_size  # header + 100 soundtracks
+        stop = self.size  # eof
+        step = self.block_size
+        for offset in xrange(start, stop, step):
+            yield TrackGroup(self, offset)
 
-        return albums
+    def seek(self, *args, **kwargs):
+        return self.f.seek(*args, **kwargs)
 
-    def _get_track_groups(self):
-        self.f.seek(0, 2)
-        f_len = self.f.tell()
+    def read(self, *args, **kwargs):
+        return self.f.read(*args, **kwargs)
 
-        group_beg = self.block_size * 101  # header + 100 soundtracks
-        group_end = f_len  # EOF
-
-        groups = {}
-        for i, offset in enumerate(
-                xrange(group_beg, group_end, self.block_size)):
-
-            group = TrackGroup(self, offset)
-            group_id = group.field_track_group_id.value
-            album_id = group.field_album_id.value
-
-            groups[group.uid] = group
-            self.albums[album_id].track_groups[group_id] = group
-
-        return groups
-
-    def _get_tracks(self):
-        tracks = {}
-        for group in self.track_groups.itervalues():
-            for i, field_id in enumerate(group.field_track_id):
-                track_id = field_id.value
-                if not track_id:
-                    continue  # not sure if always consecutive
-
-                track = Track(self, group, i)
-                album_id = track.field_album_id.value
-
-                tracks[track_id] = track
-                group.tracks[track_id] = track
-                self.albums[album_id].tracks[track_id] = track
-
-        return tracks
+    def tell(self):
+        return self.f.tell()
 
 
 def main():
@@ -258,12 +147,7 @@ def main():
 
     print 'Database: {}'.format(db.path)
 
-    for album in db.albums.itervalues():
-        print '\n{}'.format(album)
-        for track in album.tracks.itervalues():
-            print '{} ({:0.0f}:{:02.0f})'.format(
-                track,
-                *divmod(track.field_track_length_ms.value / 1000., 60))
+    return 0
 
 
 if __name__ == '__main__':
