@@ -53,17 +53,18 @@ class Field(object):
         raise NotImplementedError()
 
     @staticmethod
-    def wchar_to_str(b):
-        s = ''.join(b).decode(UTF_16)
-        return s.rstrip('\0')
+    def wchar_to_str(items, n=64):
+        result = []
+        for b in items:
+            for i in xrange(0, len(b), n):
+                c = ''.join(b[i:i+n])
+                s = c.decode(UTF_16)
+                result.append(s.rstrip('\0'))
+        return tuple(result)
 
     @staticmethod
-    def str_to_wchar(s, pad=64):
+    def str_to_wchar(s, n=64):
         raise NotImplementedError()
-        b = s.encode(UTF_16)
-        while len(b) < pad:
-            b += '\0'.encode(UTF_16)  # todo: encode once
-        return b  # todo: test padding
 
 
 class Header(Table):
@@ -92,9 +93,9 @@ class TrackGroup(Table):
     padding = Field('x', 12)
     track_ids = Field('6I', 16)
     track_lengths = Field('6I', 40)
-    # track_names = Field('384s', 40,
-    #                     to_py=Field.wchar_to_str,
-    #                     to_db=Field.str_to_wchar)
+    track_names = Field('384s', 64,
+                        to_py=Field.wchar_to_str,
+                        to_db=Field.str_to_wchar)
 
 
 class STDB:
