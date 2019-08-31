@@ -1,7 +1,8 @@
 
-import struct
-import os
+import argparse
 import logging
+import os
+import struct
 
 UTF_16 = 'UTF-16-LE'
 
@@ -30,7 +31,7 @@ class Table(object):
     @property
     def fields_(self):
         it = vars(type(self)).iteritems()
-        return {k: getattr(self, k) for k, v in it if not isinstance(v, Field)}
+        return {k: getattr(self, k) for k, v in it if isinstance(v, Field)}
 
     @property
     def empty_(self):
@@ -105,26 +106,63 @@ class TrackGroup(Table):
                         to_db=Field.str_to_wchar)
 
 
-class STDB:
+class STDB(object):
     block_size = 512
 
     def __init__(self, path):
-        self.f = open(path, 'rb')
+        self.f = None
         self.path = path
         self.root = os.path.dirname(path)
 
+        self._header = None
+
+    def __enter__(self):
+        return self.open(self.path)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.f.close()
+
+    def assert_open(self):
+        if not self.f:
+            raise IOError('database not open for reading')
+
+    def open(self, mode='rb'):
+        self.f = open(self.path, mode)
+        return self
+
+    def close(self):
+        self.assert_open()
+        self.f.close()
+
+    def seek(self, *args, **kwargs):
+        self.assert_open()
+        return self.f.seek(*args, **kwargs)
+
+    def read(self, *args, **kwargs):
+        self.assert_open()
+        return self.f.read(*args, **kwargs)
+
+    def tell(self):
+        self.assert_open()
+        return self.f.tell()
+
+    @property
+    def size(self):
+        pos = self.tell()
         self.seek(0, 2)
-        self.size = self.tell()
-        self.seek(0)
+        size = self.tell()
+        self.seek(pos)
+        return size
 
-        self.header = Header(self, 0)
-        log.debug(self.header)
+    @property
+    def header(self):
+        if not self._header:
+            self._header = Header(self, 0)
+        return self._header
 
-        self.albums = tuple(self.iter_albums())
-        log.debug(self.albums)
-
-        self.track_groups = tuple(self.iter_track_groups())
-        log.debug(self.track_groups)
+    @property
+    def albums(self):
+        return tuple(self.iter_albums())
 
     def iter_albums(self):
         start = self.block_size
@@ -133,6 +171,10 @@ class STDB:
         for offset in xrange(start, stop, step):
             yield Album(self, offset)
 
+    @property
+    def track_groups(self):
+        return tuple(self.iter_track_groups())
+
     def iter_track_groups(self):
         start = 101 * self.block_size  # header + 100 soundtracks
         stop = self.size  # eof
@@ -140,20 +182,28 @@ class STDB:
         for offset in xrange(start, stop, step):
             yield TrackGroup(self, offset)
 
-    def seek(self, *args, **kwargs):
-        return self.f.seek(*args, **kwargs)
-
-    def read(self, *args, **kwargs):
-        return self.f.read(*args, **kwargs)
-
-    def tell(self):
-        return self.f.tell()
-
 
 def main():
-    db = STDB(r'/Users/greg/Scripts/pystdb/data/fffe0000/music/ST.DB')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('db_path')
+    args = parser.parse_args()
 
-    print 'Database: {}'.format(db.path)
+    with STDB(args.db_path) as db:
+        print 'Database: {}'.format(db.path)
+        print 'Header:\n{}'.format(db.header.fields_)
+        for album in db.iter_albums():
+            print '  {:02d}: {}'.format(album.album_id, album.album_name)
+            group_ids = album.track_group_ids
+
+            # todo: integrate iteration logic into classes
+            for i, gid in enumerate(group_ids, group_ids[0]):
+                if i != gid:
+                    break
+                group = db.track_groups[gid]
+                for track_info in zip(group.track_ids,
+                                      group.track_names,
+                                      group.track_lengths):
+                    print '    {:02d}: {} ({})'.format(*track_info)
 
     return 0
 
