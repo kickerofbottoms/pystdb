@@ -22,12 +22,19 @@ class Table(object):
 
     def __repr__(self):
         return '<{} instance at 0x{:x} with {}>'.format(
-            type(self).__name__, id(self), self.fields)
+            type(self).__name__, id(self), self.fields_)
+
+    def __nonzero__(self):
+        return not self.empty_
 
     @property
-    def fields(self):
-        attrs = vars(type(self)).iterkeys()
-        return {k: getattr(self, k) for k in attrs if not k.startswith('_')}
+    def fields_(self):
+        it = vars(type(self)).iteritems()
+        return {k: getattr(self, k) for k, v in it if not isinstance(v, Field)}
+
+    @property
+    def empty_(self):
+        return not any(self.fields_.itervalues())
 
 
 class Field(object):
