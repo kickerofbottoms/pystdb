@@ -76,6 +76,14 @@ class Field(object):
 
 
 class Header(Table):
+    """
+    int32	magic               always 0x01 0x00 0x00 0x00
+    int32	count_albums
+    int32	next_album_id
+    int32	album_ids[100]
+    int32	next_track_id
+    char	padding[96]
+    """
     magic = Field('I', 0)
     count_albums = Field('I', 4)
     next_album_id = Field('I', 8)
@@ -84,6 +92,15 @@ class Header(Table):
 
 
 class Album(Table):
+    """
+    int32	magic               always 0x71 0x13 0x02 0x00
+    int32	album_id
+    int32	count_tracks
+    int32	track_group_ids[84]
+    int32	album_length        in ms
+    wchar	album_name[64]      Unicode string
+    char	padding[64]
+    """
     magic = Field('I', 0)
     album_id = Field('I', 4)
     count_tracks = Field('I', 8)
@@ -95,6 +112,16 @@ class Album(Table):
 
 
 class TrackGroup(Table):
+    """
+    int32	magic               always 0x73 0x10 0x03 0x00
+    int32	album_id
+    int32	track_group_id
+    int32	padding             why is this not null?
+    int32   track_ids[6]
+    int32   track_lengths[6]    in ms
+    wchar   track_names[64][6]
+    char	padding[64]
+    """
     magic = Field('I', 0)
     album_id = Field('I', 4)
     track_group_id = Field('I', 8)
@@ -107,8 +134,6 @@ class TrackGroup(Table):
 
 
 class STDB(object):
-    block_size = 512
-
     def __init__(self, path):
         self.f = None
         self.path = path
@@ -165,9 +190,9 @@ class STDB(object):
         return tuple(self.iter_albums())
 
     def iter_albums(self):
-        start = self.block_size
-        stop = start + self.header.count_albums * self.block_size
-        step = self.block_size
+        start = Header.block_size
+        stop = start + self.header.count_albums * Album.block_size
+        step = Album.block_size
         for offset in xrange(start, stop, step):
             yield Album(self, offset)
 
@@ -176,9 +201,9 @@ class STDB(object):
         return tuple(self.iter_track_groups())
 
     def iter_track_groups(self):
-        start = 101 * self.block_size  # header + 100 soundtracks
+        start = Header.block_size + 100 * Album.block_size
         stop = self.size  # eof
-        step = self.block_size
+        step = TrackGroup.block_size
         for offset in xrange(start, stop, step):
             yield TrackGroup(self, offset)
 
